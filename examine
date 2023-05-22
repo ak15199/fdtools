@@ -1,0 +1,62 @@
+#!python3
+# Sources
+# https://oldcomputers-ddns.org/public/pub/manuals/imd.pdf
+# http://dunfield.classiccmp.org/img42841/td0notes.txt
+# https://en.wikipedia.org/wiki/IMG_(file_format)
+
+import argparse
+from collections import OrderedDict
+import struct
+import sys
+from textwrap import wrap
+import click
+
+ENCODING = "Latin-1"
+
+def encode(block):
+    total = 0
+
+    for byte in block:
+        total += byte
+
+    bold = total & 0x80
+    fg = ((total >> 8) & 0x07)
+    bg = total & 0x07
+
+    fc = chr(ord('0')+fg)
+    bc = chr(ord('0')+bg)
+
+    return click.style(f"{fc}{bc}", fg=fg+8, bg=bg, bold=bold)
+        
+
+@click.command()
+@click.option('--blocksize', default=256)
+@click.option('--columnwidth', default=16)
+@click.option('--columns', default=2)
+@click.argument('filename')
+def main(filename, blocksize, columnwidth, columns):
+
+    line = ""
+    width = 0
+    starting = True
+    with open(filename, mode="rb") as file:
+        while starting or len(data) == blocksize:
+            starting = False
+
+            data = file.read(blocksize)
+            line +=encode(data) + " "
+            width += 1
+            if width % columnwidth == 0:
+                line += "  "
+
+            if width == columnwidth * columns:
+                click.echo(line)
+                line = ""
+                width = 0
+
+    if width != 0:
+        click.echo(line)
+
+
+if __name__ == "__main__":
+    main()

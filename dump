@@ -1,0 +1,559 @@
+#!python3
+# Sources
+# https://oldcomputers-ddns.org/public/pub/manuals/imd.pdf
+# http://dunfield.classiccmp.org/img42841/td0notes.txt
+# https://en.wikipedia.org/wiki/IMG_(file_format)
+
+from collections import OrderedDict
+import struct
+import sys
+from textwrap import wrap
+import click
+
+ENCODING = "Latin-1"
+
+
+def fatal(error):
+    click.echo(f"FATAL: {error}")
+    sys.exit(1)
+
+
+class Buffer:
+    def __init__(self, display, filename):
+        self.pointer = 0
+        self.display = display
+        with open(filename, mode="rb") as file:
+            self.buffer = file.read()
+
+    def lzh(self):
+        fatal("LZH Compression Not Supported")
+        self.buffer = self.buffer
+        self.pointer = 0
+
+    def read(self, length):
+        result = self.buffer[self.pointer : self.pointer + length]
+        self.pointer += length
+        return result
+
+    def uint8(self):
+        return ord(struct.unpack("c", self.read(1))[0])
+
+    def uint16(self):
+        return int(struct.unpack("H", self.read(2))[0])
+
+    def block(self, length):
+        return struct.unpack(str(length) + "s", self.read(length))[0]
+
+    def dump(self):
+        for i in range(16):
+            print(f"{self.pointer:04x} ", end=" ")
+            for j in range(16):
+                print(f"{ord(self.read(1)):02x} ", end=" ")
+            print()
+
+    def position(self):
+        return self.pointer
+
+
+class Storage:
+    def __init__(self, display):
+        self.display = display
+        self.data = OrderedDict()
+        self.sides = None
+        self.side = None
+        self.cyls = 0
+        self.cyl = None
+        self.sector = None
+        self.journal = []
+
+    def setsides(self, sides):
+        self.sides = sides
+
+        for side in range(self.sides):
+            self.data[side] = OrderedDict()
+
+    def setside(self, side):
+        self.side = side
+
+    def checkside(self, side):
+        if self.side != side:
+            fatal("Sector Side and Track Side don't match")
+
+    def setcyl(self, cyl):
+        if cyl not in self.data[self.side]:
+            self.data[self.side][cyl] = OrderedDict()
+
+        self.cyl = cyl
+        self.cyls = max(cyl, self.cyls)
+
+    def checkcyl(self, cyl):
+        if self.cyl != cyl:
+            fatal("Sector Cyl and Track Cyl don't match")
+
+    def setsector(self, sector):
+        self.sector = sector
+
+    def printable(self, byte):
+        if byte < 32:
+            return chr(ord("\u2400") + byte)
+
+        if byte == 32:
+            return "\u2423"
+
+        if byte == 127:
+            return "\u2421"
+
+        if 0x7F < byte < 0xA0:
+            return "\u2425"
+
+        return f"{byte:c}"
+
+    def append(self, data, index, append=False):
+        if self.sector in self.data[self.side][self.cyl]:
+            if append:
+                self.data[self.side][self.cyl][self.sector] += data
+            else:
+                fatal(
+                    "Attempt to overwrite existing sector data at side"
+                    +f"{self.side} cyl {self.cyl} sector {self.sector}"
+                )
+        else:
+            self.data[self.side][self.cyl][self.sector] = data
+
+        BYTESPERROW = 16
+
+        hexes = ""
+        chars = ""
+
+        count = 0
+        begin = index
+        for byte in data:
+            hexes += f"{byte:02x} "
+            chars += self.printable(byte) + " "
+            count += 1
+            index += 1
+
+            if count % BYTESPERROW == 0:
+                self.display.print(
+                        click.style(f"{begin:04x}", bold=True) +
+                        click.style(f" {hexes}") +
+                        click.style(chars, fg='blue', bold=True)
+                        )
+                begin = index
+                hexes = ""
+                chars = ""
+
+        if hexes:
+            hexes = hexes.ljust(BYTESPERROW * 3)
+            chars = click.style(chars, fg='blue', bold=True)
+            self.display.print(
+                    click.style(f"{begin:04x}", bold=True) +
+                    click.style(f" {hexes}") +
+                    click.style(chars, fg='blue', bold=True)
+                    )
+
+        entry = (self.side, self.cyl)
+        if entry not in self.journal:
+            self.journal.append((self.side, self.cyl))
+
+        return index
+
+
+class Display:
+
+    PADDING = 4
+    PAGEWIDTH = 110
+
+    def __init__(self):
+        self.section_level = 0
+        self.silent = False
+
+    def print(self, text, ljust=False):
+        if not self.silent:
+            padded = " "*(Display.PADDING*self.section_level) + text
+            if ljust:
+                padded = padded.ljust(Display.PAGEWIDTH, ljust)
+
+            click.echo(padded)
+
+    def section(self, name):
+        self.print("-- " + click.style(name, bold=True) + " ", ljust="-")
+        self.section_level += 1
+
+    def field(self, name, value):
+        self.print(
+                click.style(f"{name}: ") +
+                click.style(f"{value}", bold=True)
+                     )
+        return value
+
+    def flagsfield(self, name, value, bits):
+        self.section(name + " " + hex(value))
+
+        for bit in range(7, -1, -1):
+            bitset = False
+            text = ""
+            for i in range(7, -1, -1):
+                if i == bit and (2**bit & value):
+                    bitset = True
+                    text += "x"
+                else:
+                    text += "."
+
+            starting = True
+            if bitset:
+                if bit in bits:
+                    definition = wrap(bits[bit], width=60)
+                else:
+                    definition = wrap("UNDEFINED BIT")
+
+                for line in definition:
+                    if starting:
+                        self.print(text + " " + line)
+                        starting = False
+                    else:
+                        self.print("         " + line)
+
+            if starting:
+                self.print(text)
+
+        self.sectionend()
+
+        return value
+
+    def sectionend(self, name=None):
+        # name parameter is optional to assist with
+        # managing indent level
+        self.section_level -= 1
+
+    def bit(self, bit, flag):
+        return {"bit": bit, "flag": flag}
+
+    def lookup(self, buffer, table, bits=None):
+        if bits is None:
+            bits = []
+
+        value = buffer.uint8()
+
+        flags = ""
+        for bit in bits:
+            if value & bit["bit"]:
+                value = value & ~bit["bit"]
+                flags += bit["flag"]
+
+        if flags != "":
+            flags = " [" + flags + "]"
+
+        if value >= len(table):
+            value = len(table) - 1
+
+        return table[value] + flags
+
+    def crcfield(self, buffer, size):
+        if size == 2:
+            self.field("CRC", hex(buffer.uint16()))
+        elif size == 1:
+            self.field("CRC", hex(buffer.uint8()))
+        else:
+            fatal("Unsupported CRC width")
+
+
+class Analysis:
+
+    class Dict2Class:
+        def __init__(self, dictionary):
+            for key, value in dictionary.items():
+                setattr(self, key, value)
+
+    def __init__(self, args):
+
+        self.args = Analysis.Dict2Class(args)
+        self.display = Display()
+        self.storage = Storage(self.display)
+        self.buffer = Buffer(self.display, self.args.filename)
+
+    def fileheader(self):
+        signature = struct.unpack("2s", self.buffer.read(2))[0]
+        if signature == b"TD":
+            compression = "Normal"
+        elif signature == b"td":
+            compression = "Advanced"
+        else:
+            fatal("File format not recognized")
+
+        self.display.field("Compression", compression)
+        self.display.field("Sequence", self.buffer.uint8())
+        self.display.field("CheckSig", self.buffer.uint8())
+        self.display.field("Version", self.buffer.uint8())
+        self.display.field(
+            "Data Rate",
+            self.display.lookup(
+                self.buffer,
+                ("250kbps", "300kbps", "500kbps"), [self.display.bit(128, "Single Density FM")]
+            ),
+        )
+        self.display.field(
+            "DriveType",
+            self.display.lookup(self.buffer, ("Unknown", "360kb", "1.2mb", "720kb", "1.44mb")),
+        )
+        self.display.field(
+            "Stepping",
+            self.display.lookup(
+                self.buffer,
+                ("Single", "Double", "Even-Only"), [self.display.bit(128, "Has Comment Block")]
+            ),
+        )
+        self.display.field("DOS Allocation", self.display.lookup(self.buffer, ("False", "True")))
+        surfaces = self.display.field("Surfaces", self.display.lookup(self.buffer, ("Single", "Double")))
+        self.display.crcfield(self.buffer, 2)
+        self.display.sectionend()
+
+        if surfaces == "Single":
+            self.storage.setsides(1)
+        else:
+            self.storage.setsides(2)
+
+        if compression == "Advanced":
+            self.buffer.lzh()
+
+    def commentheader(self):
+        self.display.section("Comment Header")
+
+        self.display.crcfield(self.buffer, 2)
+        length = self.buffer.uint8()
+
+        self.display.field("Length", length)
+        self.display.field("Reserved", self.buffer.uint8())
+        self.display.field("Year", 1900 + self.buffer.uint8())
+        self.display.field("Month", self.buffer.uint8())
+        self.display.field("Day", self.buffer.uint8())
+        self.display.field("Hour", self.buffer.uint8())
+        self.display.field("Minute", self.buffer.uint8())
+        self.display.field("Second", self.buffer.uint8())
+
+        self.display.section("Comment")
+        block = self.buffer.block(length).decode(ENCODING)
+        for line in block.split("\0"):
+            if len(line):
+                self.display.print(line)
+        self.display.sectionend()
+
+        self.display.sectionend()
+
+    def process_raw(self, length):
+        self.storage.append(self.buffer.read(length), 0)
+
+    def process_repeat(self, length):
+        index = 0
+
+        while length > 0:
+            count = self.display.field("Repeat Count", self.buffer.uint16())
+            data = self.display.field("Repeat Data", self.buffer.block(2))
+            index = self.storage.append(data * count, index, append=True)
+            length -= 2 * count
+
+            self.display.field("Remaining bytes", length)
+
+    def process_rle(self, length):
+        index = 0
+
+        while length > 0:
+            blocklength = self.display.field("Block Length", self.buffer.uint8())
+            if blocklength == 0:
+                l = self.display.field("RLE Literal Bytes to Copy", self.buffer.uint8())
+                index = self.storage.append(self.buffer.read(l), index, append=True)
+                length -= l
+            else:
+                l = 2 * blocklength
+                count = self.display.field("RLE Repeat Count", self.buffer.uint8())
+                data = self.buffer.read(l)
+                index = self.storage.append(count * data, index, append=True)
+                length -= count * l
+
+            self.display.field("Remaining bytes", length)
+
+    def sector_data(self, length):
+        self.display.field("Block Size", self.buffer.uint16())
+        encoding = self.display.field(
+            "Encoding",
+            self.display.lookup(
+                self.buffer,
+                ("Raw", "Repeat Double Byte", "Run Length Encoded", "Undefined")
+            ),
+        )
+
+        if encoding == "Raw":
+            self.process_raw(length)
+
+        elif encoding == "Repeat Double Byte":
+            self.process_repeat(length)
+
+        elif encoding == "Run Length Encoded":
+            self.process_rle(length)
+
+        else:
+            self.buffer.dump()
+            fatal("Bad Sector Block Encoding")
+
+    def sectorindex(self, cyl, sector):
+        return f"[{cyl}:{sector}]"
+
+    def writetrack(self, output, side, cyl):
+        track = self.storage.data[side][cyl]
+
+        if self.args.resequence:
+            sorted_keys = sorted(track.keys())
+            track = OrderedDict((key, track[key]) for key in sorted_keys)
+
+        sectors = ""
+        for sector, data_s in track.items():
+            output.write(data_s)
+            sectors += f"{sector:02} "
+
+        self.display.field(f"  {side:02d}  {cyl:02d}", sectors)
+
+    def write(self):
+        self.display.section("Write Image")
+        self.display.print(click.style("Side Cyl", bold=True))
+
+        with open(self.args.writefile, "wb") as output:
+            if self.args.writemode == "verbatim":
+                for side, cyl in self.storage.journal:
+                    self.writetrack(output, side, cyl)
+
+            elif self.args.writemode == "cylinder":
+                for cyl in range(self.storage.cyls+1):
+                    for side in range(self.storage.sides):
+                        self.writetrack(output, side, cyl)
+
+            elif self.args.writemode == "side":
+                for side in range(self.storage.sides):
+                    for cyl in range(self.storage.cyls+1):
+                        self.writetrack(output, side, cyl)
+
+        self.display.sectionend("Write Image") 
+
+    def summary(self):
+        self.display.section("Summary")
+
+        self.display.print(click.style("Side Cyl", bold=True))
+        for side, cyl in self.storage.journal:
+            track = self.storage.data[side][cyl]
+            keys = " ".join((f"{key:02}" for key in track.keys()))
+            self.display.field(f"  {side:02d}  {cyl:02d}", keys)
+
+        self.display.sectionend()
+
+    def header(self):
+        self.display.section("File header")
+
+        self.fileheader()
+        self.commentheader()
+
+        self.display.sectionend()
+
+    def analyze(self):
+        self.display.section("Image Data")
+        track = 0
+        while True:
+            self.display.section("Track")
+            sectors = self.display.field("Sectors", self.buffer.uint8())
+
+            if sectors in (0, 255):
+                self.display.print("Reached end of track data")
+                break
+
+            cylinder = self.display.field("Cylinder", self.buffer.uint8())
+            side = self.display.field("Side", self.buffer.uint8())
+            self.display.crcfield(self.buffer, 1)
+
+            self.storage.setside(side)
+            self.storage.setcyl(cylinder)
+
+            for nsector in range(sectors):
+                self.display.section("Sector Index " + self.sectorindex(cylinder, nsector))
+
+                cylinder = self.display.field("Cylinder", self.buffer.uint8())
+                side = self.display.field("Side", self.buffer.uint8())
+                sector = self.display.field("Sector Label", self.buffer.uint8())
+                length = self.display.field(
+                    "Length",
+                    self.display.lookup(
+                        self.buffer,
+                        ("128 bytes", "256 bytes", "512 bytes", "1024 bytes", "2048 bytes")
+                    ),
+                )
+                length = int(length.split()[0])
+
+                self.storage.checkcyl(cylinder)
+                self.storage.checkside(side)
+
+                self.storage.setsector(sector)
+
+                flags = self.display.flagsfield(
+                    "Syndrome Flags",
+                    self.buffer.uint8(),
+                    {
+                        0: "This sector number occurred more than once on this track",
+                        1: "A data CRC error occurred  when  this  sector  was read",
+                        2: "A deleted data control mark was present for this sector",
+                        4: "A DOS sector copy was requested;  this sector  was not  allocated.   In this case,  no sector data follows this header",
+                        5: "This sector's data field  is  missing;  no  sector data follows this header",
+                        6: "No ID address field was present for this sector, but there is a data field.   The sector information  in the header represents fabricated information.",
+                    },
+                )
+
+                self.display.crcfield(self.buffer, 1)
+
+                if flags & 0x40 or flags & 0x20:
+                    self.display.print("Sector Data [EMPTY]")
+                    self.display.sectionend()  # Sector Data
+                    continue
+
+                self.display.section("Sector Data")
+                self.sector_data(length)
+                self.display.sectionend()  # Sector Data
+
+                self.display.sectionend()  # Sector Header
+
+            track += 1
+            self.display.sectionend()  # Track
+
+        self.display.sectionend()
+
+
+@click.command()
+@click.option('--writefile')
+@click.option('--writemode', type=click.Choice(['verbatim', 'cylinder', 'side'], case_sensitive=False))
+@click.option('--resequence/--no-resequence', default=False)
+@click.option('--header/--no-header', default=True)
+@click.option('--detail/--no-detail', default=False)
+@click.option('--summary/--no-summary', default=False)
+@click.argument('filename')
+def main(filename, writefile, writemode, resequence, header, detail, summary):
+    analysis = Analysis({
+        "filename": filename,
+        "writefile": writefile,
+        "writemode": writemode,
+        "resequence": resequence,
+        "header": header,
+        "detail": detail,
+        "summary": summary,
+        })
+
+    analysis.display.silent = not header
+    analysis.header()
+
+    analysis.display.silent = not detail
+    analysis.analyze()
+
+    analysis.display.silent = False
+   
+    if summary:
+        analysis.summary()
+
+    if writefile is not None:
+        analysis.write()
+
+if __name__ == "__main__":
+    main()
