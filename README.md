@@ -45,6 +45,10 @@ https://web.archive.org/web/20160527014011/http://www.coco3.com/community/2010/0
 
 Setting the `resequence` flag will reorder the sectors in logical order, eliminating the skip.
 
+### Bugs and Notes
+
+Dump does not support compressed or MSDOS variants.
+
 ## examine
 
 Inspects an input file block-by-block, and renders a block-by-block color coded representation to the screen. This is useful for making a high level comparison of how a file is laid out.
