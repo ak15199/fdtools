@@ -53,10 +53,10 @@ Dump does not support compressed or MSDOS variants.
 
 Inspects an input file block-by-block, and renders a block-by-block color coded representation to the screen. This is useful for making a high level comparison of how a file is laid out.
 
+```
 $ ./examine --help                            
 Usage: examine [OPTIONS] FILENAME
 
-```
 Options:
   --blocksize INTEGER
   --columnwidth INTEGER
